@@ -24,6 +24,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 /**
  * A thread to periodically show the status of the experiment to reassure you that progress is being made.
@@ -56,6 +57,13 @@ public class StatusThread extends Thread {
   private double minLoadAvg = Double.MAX_VALUE;
   private long lastGCCount = 0;
   private long lastGCTime = 0;
+
+  // Exit immediately if any FAILED count is non-zero on the status line.
+  // Enable with JVM flag: -Dycsb.exit.on.failure=true
+  private final boolean exitOnFailure = Boolean.parseBoolean(System.getProperty("ycsb.exit.on.failure", "false"));
+
+  // Match lines like: [READ-FAILED: Count=32, ...] (any op, non-zero count)
+  private static final Pattern FAIL_RE = Pattern.compile("\\[(READ|UPDATE|INSERT|SCAN)-FAILED:\\s*Count=([1-9][0-9]*)");
 
   /**
    * Creates a new StatusThread without JVM stat tracking.
@@ -181,6 +189,13 @@ public class StatusThread extends Thread {
     if (standardstatus) {
       System.out.println(msg);
     }
+
+    // exit immediately if any failures were reported on this line
+    if (exitOnFailure && FAIL_RE.matcher(msg).find()) {
+      System.err.println("YCSB: exiting due to operation failures.");
+      System.exit(2);
+    }
+
     return totalops;
   }
 
