@@ -271,13 +271,12 @@ public class StatusThread extends Thread {
       }
     }
     if (active != null) {
-      msg.append(String.format(" [THROTTLE slot %d–%d ms @ %.3f tps] ",
-          active.getStartMs(), active.getStopMs(), active.getTps()));
+      msg.append(String.format(" [Throttle: %.1f ops] ", active.getTps()));
     } else {
       if (baseTargetTps != null) {
-        msg.append(String.format(" [THROTTLE outside windows @ %.3f tps] ", baseTargetTps));
+        msg.append(String.format(" [Throttle: %.1f ops] ", baseTargetTps));
       } else {
-        msg.append(" [THROTTLE outside windows: unthrottled] ");
+        msg.append(" [unthrottled] ");
       }
     }
   }

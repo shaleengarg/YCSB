@@ -8,9 +8,9 @@
  *   http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied. See the License for the specific language governing
+ * distributed under the License is distributed on an "AS IS"
+ * BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing
  * permissions and limitations under the License. See accompanying
  * LICENSE file.
  */
@@ -353,7 +353,8 @@ public final class Client {
       en = System.currentTimeMillis();
     }
 
-    cleanupAndExport(props, status, workload, tracer, terminator, st, en, opsDone);
+    // Pass runtime to keep parameter count within Checkstyle limit.
+    cleanupAndExport(props, status, workload, tracer, terminator, en - st, opsDone);
     System.exit(0);
   }
 
@@ -428,7 +429,7 @@ public final class Client {
 
   private static void cleanupAndExport(Properties props, boolean status, Workload workload,
                                        Tracer tracer, Thread terminator,
-                                       long st, long en, int opsDone) {
+                                       long runtimeMs, int opsDone) {
     try {
       try (final TraceScope span = tracer.newScope(CLIENT_CLEANUP_SPAN)) {
 
@@ -457,7 +458,7 @@ public final class Client {
 
     try {
       try (final TraceScope span = tracer.newScope(CLIENT_EXPORT_MEASUREMENTS_SPAN)) {
-        exportMeasurements(props, opsDone, en - st);
+        exportMeasurements(props, opsDone, runtimeMs);
       }
     } catch (IOException e) {
       System.err.println("Could not export measurements, error: " + e.getMessage());
