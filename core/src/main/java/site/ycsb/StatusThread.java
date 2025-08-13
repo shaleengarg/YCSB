@@ -1,16 +1,17 @@
 /**
- * Copyright (c) 2010-2016 Yahoo! Inc., 2017 YCSB contributors All rights reserved.
- * <p>
- * Licensed under the Apache License, Version 2.0 (the "License"); you
- * may not use this file except in compliance with the License. You
- * may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ * Copyright (c) 2010-2016 Yahoo! Inc., 2017
+ * YCSB contributors All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied. See the License for the specific language governing
+ * distributed under the License is distributed on an "AS IS"
+ * BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing
  * permissions and limitations under the License. See accompanying
  * LICENSE file.
  */
@@ -18,16 +19,21 @@
 package site.ycsb;
 
 import site.ycsb.measurements.Measurements;
+
 import java.text.DecimalFormat;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
 /**
- * A thread to periodically show the status of the experiment to reassure you that progress is being made.
+ * A thread to periodically show the status of the experiment to reassure you
+ * that progress is being made.
+ *
+ * This version also displays the active throttle.schedule slot (if any) and its TPS.
  */
 public class StatusThread extends Thread {
   // Counts down each of the clients completing
@@ -60,24 +66,34 @@ public class StatusThread extends Thread {
 
   // Exit immediately if any FAILED count is non-zero on the status line.
   // Enable with JVM flag: -Dycsb.exit.on.failure=true
-  private final boolean exitOnFailure = Boolean.parseBoolean(System.getProperty("ycsb.exit.on.failure", "false"));
+  private final boolean exitOnFailure = Boolean.parseBoolean(
+      System.getProperty("ycsb.exit.on.failure", "false"));
 
   // Match lines like: [READ-FAILED: Count=32, ...] (any op, non-zero count)
-  private static final Pattern FAIL_RE = Pattern.compile("\\[(READ|UPDATE|INSERT|SCAN)-FAILED:\\s*Count=([1-9][0-9]*)");
+  private static final Pattern FAIL_RE = Pattern.compile(
+      "\\[(READ|UPDATE|INSERT|SCAN)-FAILED:\\s*Count=([1-9][0-9]*)");
 
-  /**
-   * Creates a new StatusThread without JVM stat tracking.
-   *
-   * @param completeLatch         The latch that each client thread will {@link CountDownLatch#countDown()}
-   *                              as they complete.
-   * @param clients               The clients to collect metrics from.
-   * @param label                 The label for the status.
-   * @param standardstatus        If true the status is printed to stdout in addition to stderr.
-   * @param statusIntervalSeconds The number of seconds between status updates.
-   */
+  private static final String PROP_THROTTLE_SCHEDULE = "throttle.schedule";
+  private static final String PROP_THROTTLE_SCHEDULE_T0MS = "throttle.schedule.t0ms";
+  private static final String PROP_THROTTLE_SCHEDULE_BASE_TARGET = "throttle.schedule.base_target";
+
+  private final ThroughputSchedule schedule;
+  private final Long scheduleT0Ms;
+  private final Double baseTargetTps;
+
+/**
+  * Creates a new StatusThread without JVM stat tracking.
+  *
+  * @param completeLatch         The latch that each client thread will {@link CountDownLatch#countDown()}
+  *                              as they complete.
+  * @param clients               The clients to collect metrics from.
+  * @param label                 The label for the status.
+  * @param standardstatus        If true the status is printed to stdout in addition to stderr.
+  * @param statusIntervalSeconds The number of seconds between status updates.
+  */
   public StatusThread(CountDownLatch completeLatch, List<ClientThread> clients,
                       String label, boolean standardstatus, int statusIntervalSeconds) {
-    this(completeLatch, clients, label, standardstatus, statusIntervalSeconds, false);
+    this(completeLatch, clients, label, standardstatus, statusIntervalSeconds, false, null);
   }
 
   /**
@@ -94,13 +110,59 @@ public class StatusThread extends Thread {
   public StatusThread(CountDownLatch completeLatch, List<ClientThread> clients,
                       String label, boolean standardstatus, int statusIntervalSeconds,
                       boolean trackJVMStats) {
+    this(completeLatch, clients, label, standardstatus, statusIntervalSeconds, trackJVMStats, null);
+  }
+
+  public StatusThread(CountDownLatch completeLatch, List<ClientThread> clients,
+                      String label, boolean standardstatus, int statusIntervalSeconds,
+                      boolean trackJVMStats, Properties props) {
     this.completeLatch = completeLatch;
     this.clients = clients;
     this.label = label;
     this.standardstatus = standardstatus;
-    sleeptimeNs = TimeUnit.SECONDS.toNanos(statusIntervalSeconds);
-    measurements = Measurements.getMeasurements();
+    this.sleeptimeNs = TimeUnit.SECONDS.toNanos(statusIntervalSeconds);
+    this.measurements = Measurements.getMeasurements();
     this.trackJVMStats = trackJVMStats;
+
+    if (props != null) {
+      ThroughputSchedule sched = null;
+      Long t0 = null;
+      Double base = null;
+      String spec = props.getProperty(PROP_THROTTLE_SCHEDULE);
+      if (spec != null && !spec.trim().isEmpty()) {
+        try {
+          sched = ThroughputSchedule.parse(spec);
+        } catch (IllegalArgumentException iae) {
+          // ignore bad schedule; status thread keeps running
+        }
+      }
+      String t0s = props.getProperty(PROP_THROTTLE_SCHEDULE_T0MS);
+      if (t0s != null) {
+        try {
+          t0 = Long.parseLong(t0s);
+        } catch (NumberFormatException ignore) {
+          // ignore parse error
+        }
+      }
+      String baseStr = props.getProperty(PROP_THROTTLE_SCHEDULE_BASE_TARGET);
+      if (baseStr != null) {
+        try {
+          int b = Integer.parseInt(baseStr);
+          if (b > 0) {
+            base = (double) b;
+          }
+        } catch (NumberFormatException ignore) {
+          // ignore parse error
+        }
+      }
+      this.schedule = sched;
+      this.scheduleT0Ms = t0;
+      this.baseTargetTps = base;
+    } else {
+      this.schedule = null;
+      this.scheduleT0Ms = null;
+      this.baseTargetTps = null;
+    }
   }
 
   /**
@@ -115,7 +177,7 @@ public class StatusThread extends Thread {
     long lastTotalOps = 0;
 
     boolean alldone;
-
+    
     do {
       long nowMs = System.currentTimeMillis();
 
@@ -129,8 +191,7 @@ public class StatusThread extends Thread {
 
       startIntervalMs = nowMs;
       deadline += sleeptimeNs;
-    }
-    while (!alldone);
+    } while (!alldone);
 
     if (trackJVMStats) {
       measureJVM();
@@ -160,32 +221,30 @@ public class StatusThread extends Thread {
       totalops += t.getOpsDone();
       todoops += t.getOpsTodo();
     }
-
-
     long interval = endIntervalMs - startTimeMs;
-    double throughput = 1000.0 * (((double) totalops) / (double) interval);
-    double curthroughput = 1000.0 * (((double) (totalops - lastTotalOps)) /
-        ((double) (endIntervalMs - startIntervalMs)));
-    long estremaining = (long) Math.ceil(todoops / throughput);
-
+    double throughput = 1000.0 * (totalops / (double) interval);
+    double curthroughput = 1000.0 * ((totalops - lastTotalOps)
+        / (double) (endIntervalMs - startIntervalMs));
+    long estremaining = (long) Math.ceil(todoops / Math.max(throughput, 1e-9));
 
     DecimalFormat d = new DecimalFormat("#.##");
     String labelString = this.label + format.format(new Date());
-
-    StringBuilder msg = new StringBuilder(labelString).append(" ").append(interval / 1000).append(" sec: ");
+    StringBuilder msg = new StringBuilder(labelString)
+        .append(" ").append(interval / 1000).append(" sec: ");
     msg.append(totalops).append(" operations; ");
-
+    
     if (totalops != 0) {
       msg.append(d.format(curthroughput)).append(" current ops/sec; ");
     }
     if (todoops != 0) {
       msg.append("est completion in ").append(RemainingFormatter.format(estremaining));
     }
-
+    
+    appendThrottleInfo(msg, endIntervalMs);
     msg.append(Measurements.getMeasurements().getSummary());
-
+    
     System.err.println(msg);
-
+    
     if (standardstatus) {
       System.out.println(msg);
     }
@@ -195,8 +254,32 @@ public class StatusThread extends Thread {
       System.err.println("YCSB: exiting due to operation failures.");
       System.exit(2);
     }
-
     return totalops;
+  }
+
+
+  private void appendThrottleInfo(StringBuilder msg, long nowMs) {
+    if (schedule == null || scheduleT0Ms == null) {
+      return;
+    }
+    long elapsedMs = nowMs - scheduleT0Ms;
+    ThroughputSchedule.Slot active = null;
+    for (ThroughputSchedule.Slot s : schedule.slots()) {
+      if (elapsedMs >= s.getStartMs() && elapsedMs < s.getStopMs()) {
+        active = s;
+        break;
+      }
+    }
+    if (active != null) {
+      msg.append(String.format(" [THROTTLE slot %d–%d ms @ %.3f tps] ",
+          active.getStartMs(), active.getStopMs(), active.getTps()));
+    } else {
+      if (baseTargetTps != null) {
+        msg.append(String.format(" [THROTTLE outside windows @ %.3f tps] ", baseTargetTps));
+      } else {
+        msg.append(" [THROTTLE outside windows: unthrottled] ");
+      }
+    }
   }
 
   /**
@@ -254,7 +337,6 @@ public class StatusThread extends Thread {
     // zero, just ommit it.
     final double systemLoad = Utils.getSystemLoadAverage();
     if (systemLoad >= 0) {
-      // TODO - store the double if measurements allows for them
       measurements.measure("SYS_LOAD_AVG", (int) systemLoad);
       if (systemLoad > maxLoadAvg) {
         maxLoadAvg = systemLoad;
