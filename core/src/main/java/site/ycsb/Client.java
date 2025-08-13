@@ -4,13 +4,13 @@
  * Licensed under the Apache License, Version 2.0 (the "License"); you
  * may not use this file except in compliance with the License. You
  * may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
- * implied. See the License for the specific language governing
+ * distributed under the License is distributed on an "AS IS"
+ * BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express
+ * or implied. See the License for the specific language governing
  * permissions and limitations under the License. See accompanying
  * LICENSE file.
  */
@@ -28,8 +28,14 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Map.Entry;
+import java.util.List;
+import java.util.Properties;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -59,12 +65,13 @@ final class RemainingFormatter {
       long minutes = TimeUnit.SECONDS.toMinutes(seconds);
       if (minutes > 0) {
         time.append(minutes).append(minutes == 1 ? " minute " : " minutes ");
-        seconds -= TimeUnit.MINUTES.toSeconds(seconds);
+        // subtract minutes (not seconds)
+        seconds -= TimeUnit.MINUTES.toSeconds(minutes);
       }
     }
     /* Only bother to include seconds if we're < 1 minute */
     if (time.length() == 0) {
-      time.append(seconds).append(time.length() == 1 ? " second " : " seconds ");
+      time.append(seconds).append(seconds == 1 ? " second " : " seconds ");
     }
     return time;
   }
@@ -107,8 +114,7 @@ public final class Client {
   public static final String EXPORTER_PROPERTY = "exporter";
 
   /**
-   * If set to the path of a file, YCSB will write all output to this file
-   * instead of STDOUT.
+   * If set, results are written to this file instead of STDOUT.
    */
   public static final String EXPORT_FILE_PROPERTY = "exportfile";
 
@@ -121,6 +127,7 @@ public final class Client {
    * Indicates how many inserts to do if less than recordcount.
    * Useful for partitioning the load among multiple servers if the client is the bottleneck.
    * Additionally workloads should support the "insertstart" property which tells them which record to start at.
+   * Workloads should also support "insertstart".
    */
   public static final String INSERT_COUNT_PROPERTY = "insertcount";
 
@@ -150,15 +157,21 @@ public final class Client {
   public static final String LABEL_PROPERTY = "label";
 
   /**
-   * An optional thread used to track progress and measure JVM stats.
+   * Specifies a schedule for throttling the client throughput.
+   * Format: start:stop:tps[,start:stop:tps...], times relative to run start.
+   * Units: ms|s|m|h (default s). Outside windows, base -target is honored,
+   * or unthrottled if -target is not set.
    */
+  private static final String PROP_THROTTLE_SCHEDULE = "throttle.schedule";
+
+  /** Props populated for threads when a schedule is used. */
+  private static final String PROP_THROTTLE_SCHEDULE_T0MS = "throttle.schedule.t0ms";
+  private static final String PROP_THROTTLE_SCHEDULE_BASE_TARGET = "throttle.schedule.base_target";
+
+  /** Optional thread for progress/JVM stats. */
   private static StatusThread statusthread = null;
 
-  // HTrace integration related constants.
-
-  /**
-   * All keys for configuring the tracing system start with this prefix.
-   */
+  // HTrace integration
   private static final String HTRACE_KEY_PREFIX = "htrace.";
   private static final String CLIENT_WORKLOAD_INIT_SPAN = "Client#workload_init";
   private static final String CLIENT_INIT_SPAN = "Client#init";
@@ -169,30 +182,29 @@ public final class Client {
   public static void usageMessage() {
     System.out.println("Usage: java site.ycsb.Client [options]");
     System.out.println("Options:");
-    System.out.println("  -threads n: execute using n threads (default: 1) - can also be specified as the \n" +
-        "        \"threadcount\" property using -p");
-    System.out.println("  -target n: attempt to do n operations per second (default: unlimited) - can also\n" +
-        "       be specified as the \"target\" property using -p");
-    System.out.println("  -load:  run the loading phase of the workload");
-    System.out.println("  -t:  run the transactions phase of the workload (default)");
-    System.out.println("  -db dbname: specify the name of the DB to use (default: site.ycsb.BasicDB) - \n" +
-        "        can also be specified as the \"db\" property using -p");
-    System.out.println("  -P propertyfile: load properties from the given file. Multiple files can");
-    System.out.println("           be specified, and will be processed in the order specified");
-    System.out.println("  -p name=value:  specify a property to be passed to the DB and workloads;");
-    System.out.println("          multiple properties can be specified, and override any");
-    System.out.println("          values in the propertyfile");
-    System.out.println("  -s:  show status during run (default: no status)");
-    System.out.println("  -l label:  use label for status (e.g. to label one experiment out of a whole batch)");
-    System.out.println("");
+    System.out.println("  -threads n: execute using n threads (default: 1)");
+    System.out.println("      (or -p threadcount=n)");
+    System.out.println("  -target n: attempt n operations per second (default: unlimited)");
+    System.out.println("      (or -p target=n)");
+    System.out.println("  -load: run the loading phase of the workload");
+    System.out.println("  -t: run the transactions phase of the workload (default)");
+    System.out.println("  -db dbname: DB class (default: site.ycsb.BasicDB)");
+    System.out.println("      (or -p db=...)");
+    System.out.println("  -P file: load properties from file (can be given multiple times)");
+    System.out.println("  -p name=value: set a property (overrides property files)");
+    System.out.println("  -s: show status during run");
+    System.out.println("  -l label: label for status output");
+    System.out.println();
     System.out.println("Required properties:");
-    System.out.println("  " + WORKLOAD_PROPERTY + ": the name of the workload class to use (e.g. " +
-        "site.ycsb.workloads.CoreWorkload)");
-    System.out.println("");
-    System.out.println("To run the transaction phase from multiple servers, start a separate client on each.");
-    System.out.println("To run the load phase from multiple servers, start a separate client on each; additionally,");
-    System.out.println("use the \"insertcount\" and \"insertstart\" properties to divide up the records " +
-        "to be inserted");
+    System.out.println("  " + WORKLOAD_PROPERTY + ": workload class (e.g. site.ycsb.workloads.CoreWorkload)");
+    System.out.println();
+    System.out.println("Optional throttle schedule (overrides -target during windows):");
+    System.out.println("  -p " + PROP_THROTTLE_SCHEDULE + "=start:stop:tps[,start:stop:tps...]");
+    System.out.println("     start/stop relative to run start; units: ms|s|m|h (default s).");
+    System.out.println("     Example: -p " + PROP_THROTTLE_SCHEDULE + "=0s:2m:1500,150s:5m:800");
+    System.out.println();
+    System.out.println("To run transactions from multiple servers, start one client on each.");
+    System.out.println("To run load from multiple servers, also use insertcount/insertstart to partition keys.");
   }
 
   public static boolean checkRequiredProperties(Properties props) {
@@ -200,10 +212,8 @@ public final class Client {
       System.out.println("Missing property: " + WORKLOAD_PROPERTY);
       return false;
     }
-
     return true;
   }
-
 
   /**
    * Exports the measurements to either sysout or a file using the exporter
@@ -224,11 +234,12 @@ public final class Client {
         out = new FileOutputStream(exportFile);
       }
 
-      // if no exporter is provided the default text one will be used
-      String exporterStr = props.getProperty(EXPORTER_PROPERTY,
+      String exporterStr = props.getProperty(
+          EXPORTER_PROPERTY,
           "site.ycsb.measurements.exporter.TextMeasurementsExporter");
       try {
-        exporter = (MeasurementsExporter) Class.forName(exporterStr).getConstructor(OutputStream.class)
+        exporter = (MeasurementsExporter) Class.forName(exporterStr)
+            .getConstructor(OutputStream.class)
             .newInstance(out);
       } catch (Exception e) {
         System.err.println("Could not find exporter " + exporterStr
@@ -255,7 +266,8 @@ public final class Client {
       exporter.write("TOTAL_GCs", "Count", totalGCCount);
 
       exporter.write("TOTAL_GC_TIME", "Time(ms)", totalGCTime);
-      exporter.write("TOTAL_GC_TIME_%", "Time(%)", ((double) totalGCTime / runtime) * (double) 100);
+      exporter.write("TOTAL_GC_TIME_%", "Time(%)",
+          ((double) totalGCTime / runtime) * (double) 100);
       if (statusthread != null && statusthread.trackJVMStats()) {
         exporter.write("MAX_MEM_USED", "MBs", statusthread.getMaxUsedMem());
         exporter.write("MIN_MEM_USED", "MBs", statusthread.getMinUsedMem());
@@ -279,20 +291,20 @@ public final class Client {
 
     boolean status = Boolean.valueOf(props.getProperty(STATUS_PROPERTY, String.valueOf(false)));
     String label = props.getProperty(LABEL_PROPERTY, "");
-
     long maxExecutionTime = Integer.parseInt(props.getProperty(MAX_EXECUTION_TIME, "0"));
 
-    //get number of threads, target and db
+    // threadcount, db, -target
     int threadcount = Integer.parseInt(props.getProperty(THREAD_COUNT_PROPERTY, "1"));
     String dbname = props.getProperty(DB_PROPERTY, "site.ycsb.BasicDB");
     int target = Integer.parseInt(props.getProperty(TARGET_PROPERTY, "0"));
 
-    //compute the target throughput
-    double targetperthreadperms = -1;
-    if (target > 0) {
-      double targetperthread = ((double) target) / ((double) threadcount);
-      targetperthreadperms = targetperthread / 1000.0;
-    }
+    // Parse schedule and validate vs maxexecutiontime (if provided).
+    final String scheduleSpec = props.getProperty(PROP_THROTTLE_SCHEDULE);
+    final ThroughputSchedule schedule = ThroughputSchedule.parse(scheduleSpec);
+    validateThrottleSchedule(schedule, maxExecutionTime);
+
+    // Base target per-thread per-ms (legacy pacing value).
+    double targetperthreadperms = computeLegacyPerThreadPermitsMs(target, threadcount);
 
     Thread warningthread = setupWarningThread();
     warningthread.start();
@@ -300,67 +312,124 @@ public final class Client {
     Measurements.setProperties(props);
 
     Workload workload = getWorkload(props);
-
     final Tracer tracer = getTracer(props, workload);
-
     initWorkload(props, warningthread, workload, tracer);
+
+    // If schedule is present, stash base target and t0 in props for clients BEFORE constructing threads.
+    if (schedule != null) {
+      props.setProperty(PROP_THROTTLE_SCHEDULE_BASE_TARGET, Integer.toString(Math.max(target, 0)));
+      props.setProperty(PROP_THROTTLE_SCHEDULE_T0MS, Long.toString(System.currentTimeMillis()));
+      logThrottleSchedule(schedule, target);
+    }
 
     System.err.println("Starting test.");
     final CountDownLatch completeLatch = new CountDownLatch(threadcount);
 
-    final List<ClientThread> clients = initDb(dbname, props, threadcount, targetperthreadperms,
-        workload, tracer, completeLatch);
+    final List<ClientThread> clients = initDb(
+        dbname, props, threadcount, targetperthreadperms, workload, tracer, completeLatch);
 
     if (status) {
-      boolean standardstatus = false;
-      if (props.getProperty(Measurements.MEASUREMENT_TYPE_PROPERTY, "").compareTo("timeseries") == 0) {
-        standardstatus = true;
-      }
-      int statusIntervalSeconds = Integer.parseInt(props.getProperty("status.interval", "10"));
-      boolean trackJVMStats = props.getProperty(Measurements.MEASUREMENT_TRACK_JVM_PROPERTY,
-          Measurements.MEASUREMENT_TRACK_JVM_PROPERTY_DEFAULT).equals("true");
-      statusthread = new StatusThread(completeLatch, clients, label, standardstatus, statusIntervalSeconds,
-          trackJVMStats);
-      statusthread.start();
+      startStatusThread(completeLatch, clients, label, props);
     }
 
-    Thread terminator = null;
+    // Start and (optionally) terminate after maxExecutionTime.
     long st;
     long en;
     int opsDone;
+    Thread terminator = null;
 
     try (final TraceScope span = tracer.newScope(CLIENT_WORKLOAD_SPAN)) {
+      final Map<Thread, ClientThread> threads = startClientThreads(clients, tracer);
 
-      final Map<Thread, ClientThread> threads = new HashMap<>(threadcount);
-      for (ClientThread client : clients) {
-        threads.put(new Thread(tracer.wrap(client, "ClientThread")), client);
-      }
-
+      // Measure wall time for the run (separate from t0 used for throttling).
       st = System.currentTimeMillis();
-
-      for (Thread t : threads.keySet()) {
-        t.start();
-      }
 
       if (maxExecutionTime > 0) {
         terminator = new TerminatorThread(maxExecutionTime, threads.keySet(), workload);
         terminator.start();
       }
 
-      opsDone = 0;
-
-      for (Map.Entry<Thread, ClientThread> entry : threads.entrySet()) {
-        try {
-          entry.getKey().join();
-          opsDone += entry.getValue().getOpsDone();
-        } catch (InterruptedException ignored) {
-          // ignored
-        }
-      }
-
+      opsDone = joinClientsAndCountOps(threads);
       en = System.currentTimeMillis();
     }
 
+    // Pass runtime to keep parameter count within Checkstyle limit.
+    cleanupAndExport(props, status, workload, tracer, terminator, en - st, opsDone);
+    System.exit(0);
+  }
+
+  // ------------------------ helpers to keep main short ------------------------
+
+  private static void validateThrottleSchedule(ThroughputSchedule schedule, long maxExecutionTime) {
+    if (schedule == null) {
+      return;
+    }
+    if (maxExecutionTime > 0) {
+      long maxMs = maxExecutionTime * 1000L;
+      for (ThroughputSchedule.Slot s : schedule.slots()) {
+        if (s.getStopMs() > maxMs) {
+          throw new IllegalArgumentException(
+              "throttle.schedule STOP (" + s.getStopMs()
+                  + " ms) exceeds maxexecutiontime (" + maxMs + " ms): " + s);
+        }
+      }
+    } else {
+      System.err.println("[YCSB] Warning: throttle.schedule supplied without maxexecutiontime; "
+          + "cannot verify that STOP < total runtime.");
+    }
+  }
+
+  private static double computeLegacyPerThreadPermitsMs(int target, int threadcount) {
+    if (target <= 0) {
+      return -1.0;
+    }
+    double targetperthread = ((double) target) / ((double) threadcount);
+    return targetperthread / 1000.0;
+  }
+
+  private static void logThrottleSchedule(ThroughputSchedule schedule, int baseTarget) {
+    StringBuilder sb = new StringBuilder();
+    sb.append("[YCSB] throttle.schedule: ")
+        .append(schedule.slots().size())
+        .append(" window(s)\n");
+    for (ThroughputSchedule.Slot s : schedule.slots()) {
+      sb.append(String.format(Locale.ROOT,
+          "  %d–%d ms -> %.3f tps%n", s.getStartMs(), s.getStopMs(), s.getTps()));
+    }
+    if (baseTarget > 0) {
+      sb.append("Outside windows: honoring base -target = ").append(baseTarget).append(" tps\n");
+    } else {
+      sb.append("Outside windows: unthrottled (no -target)\n");
+    }
+    System.err.print(sb.toString());
+  }
+
+  private static Map<Thread, ClientThread> startClientThreads(List<ClientThread> clients, Tracer tracer) {
+    final Map<Thread, ClientThread> threads = new HashMap<Thread, ClientThread>(clients.size());
+    for (ClientThread client : clients) {
+      Thread t = new Thread(tracer.wrap(client, "ClientThread"));
+      threads.put(t, client);
+      t.start();
+    }
+    return threads;
+  }
+
+  private static int joinClientsAndCountOps(Map<Thread, ClientThread> threads) {
+    int opsDone = 0;
+    for (Map.Entry<Thread, ClientThread> entry : threads.entrySet()) {
+      try {
+        entry.getKey().join();
+        opsDone += entry.getValue().getOpsDone();
+      } catch (InterruptedException ignored) {
+        // ignored
+      }
+    }
+    return opsDone;
+  }
+
+  private static void cleanupAndExport(Properties props, boolean status, Workload workload,
+                                       Tracer tracer, Thread terminator,
+                                       long runtimeMs, int opsDone) {
     try {
       try (final TraceScope span = tracer.newScope(CLIENT_CLEANUP_SPAN)) {
 
@@ -389,24 +458,40 @@ public final class Client {
 
     try {
       try (final TraceScope span = tracer.newScope(CLIENT_EXPORT_MEASUREMENTS_SPAN)) {
-        exportMeasurements(props, opsDone, en - st);
+        exportMeasurements(props, opsDone, runtimeMs);
       }
     } catch (IOException e) {
       System.err.println("Could not export measurements, error: " + e.getMessage());
       e.printStackTrace();
       System.exit(-1);
     }
+  }
 
-    System.exit(0);
+  private static void startStatusThread(CountDownLatch completeLatch, List<ClientThread> clients,
+                                        String label, Properties props) {
+    boolean standardstatus = false;
+    if (props.getProperty(Measurements.MEASUREMENT_TYPE_PROPERTY, "")
+        .compareTo("timeseries") == 0) {
+      standardstatus = true;
+    }
+    int statusIntervalSeconds = Integer.parseInt(props.getProperty("status.interval", "10"));
+    boolean trackJVMStats = props.getProperty(
+        Measurements.MEASUREMENT_TRACK_JVM_PROPERTY,
+        Measurements.MEASUREMENT_TRACK_JVM_PROPERTY_DEFAULT).equals("true");
+
+    statusthread = new StatusThread(
+        completeLatch, clients, label, standardstatus, statusIntervalSeconds, trackJVMStats, props);
+    statusthread.start();
   }
 
   private static List<ClientThread> initDb(String dbname, Properties props, int threadcount,
                                            double targetperthreadperms, Workload workload, Tracer tracer,
                                            CountDownLatch completeLatch) {
     boolean initFailed = false;
-    boolean dotransactions = Boolean.valueOf(props.getProperty(DO_TRANSACTIONS_PROPERTY, String.valueOf(true)));
+    boolean dotransactions =
+        Boolean.valueOf(props.getProperty(DO_TRANSACTIONS_PROPERTY, String.valueOf(true)));
 
-    final List<ClientThread> clients = new ArrayList<>(threadcount);
+    final List<ClientThread> clients = new ArrayList<ClientThread>(threadcount);
     try (final TraceScope span = tracer.newScope(CLIENT_INIT_SPAN)) {
       long opcount;
       if (dotransactions) {
@@ -418,9 +503,10 @@ public final class Client {
           opcount = Long.parseLong(props.getProperty(RECORD_COUNT_PROPERTY, DEFAULT_RECORD_COUNT));
         }
       }
-      if (threadcount > opcount && opcount > 0){
-        threadcount = (int)(opcount);
-        System.out.println("Warning: the threadcount is bigger than recordcount, the threadcount will be recordcount!");
+      if (threadcount > opcount && opcount > 0) {
+        threadcount = (int) (opcount);
+        System.out.println(
+            "Warning: the threadcount is bigger than recordcount, the threadcount will be recordcount!");
       }
       for (int threadid = 0; threadid < threadcount; threadid++) {
         DB db;
@@ -434,13 +520,13 @@ public final class Client {
 
         long threadopcount = opcount / threadcount;
 
-        // ensure correct number of operations, in case opcount is not a multiple of threadcount
+        // ensure correct number of operations if opcount not multiple of threadcount
         if (threadid < opcount % threadcount) {
           ++threadopcount;
         }
 
-        ClientThread t = new ClientThread(db, dotransactions, workload, props, threadopcount, targetperthreadperms,
-            completeLatch);
+        ClientThread t = new ClientThread(
+            db, dotransactions, workload, props, threadopcount, targetperthreadperms, completeLatch);
         t.setThreadId(threadid);
         t.setThreadCount(threadcount);
         clients.add(t);
@@ -460,7 +546,8 @@ public final class Client {
         .build();
   }
 
-  private static void initWorkload(Properties props, Thread warningthread, Workload workload, Tracer tracer) {
+  private static void initWorkload(Properties props, Thread warningthread,
+                                   Workload workload, Tracer tracer) {
     try {
       try (final TraceScope span = tracer.newScope(CLIENT_WORKLOAD_INIT_SPAN)) {
         workload.init(props);
@@ -474,10 +561,11 @@ public final class Client {
   }
 
   private static HTraceConfiguration getHTraceConfiguration(Properties props) {
-    final Map<String, String> filteredProperties = new HashMap<>();
+    final Map<String, String> filteredProperties = new HashMap<String, String>();
     for (String key : props.stringPropertyNames()) {
       if (key.startsWith(HTRACE_KEY_PREFIX)) {
-        filteredProperties.put(key.substring(HTRACE_KEY_PREFIX.length()), props.getProperty(key));
+        filteredProperties.put(
+            key.substring(HTRACE_KEY_PREFIX.length()), props.getProperty(key));
       }
     }
     return HTraceConfiguration.fromMap(filteredProperties);
@@ -515,14 +603,12 @@ public final class Client {
     System.err.println("Loading workload...");
     try {
       Class workloadclass = classLoader.loadClass(props.getProperty(WORKLOAD_PROPERTY));
-
       return (Workload) workloadclass.newInstance();
     } catch (Exception e) {
       e.printStackTrace();
       e.printStackTrace(System.out);
       System.exit(0);
     }
-
     return null;
   }
 
@@ -610,10 +696,9 @@ public final class Client {
           System.exit(0);
         }
 
-        //Issue #5 - remove call to stringPropertyNames to make compilable under Java 1.5
+        // remove call to stringPropertyNames to make compilable under Java 1.5
         for (Enumeration e = myfileprops.propertyNames(); e.hasMoreElements();) {
           String prop = (String) e.nextElement();
-
           fileprops.setProperty(prop, myfileprops.getProperty(prop));
         }
 
@@ -627,7 +712,7 @@ public final class Client {
         int eq = args[argindex].indexOf('=');
         if (eq < 0) {
           usageMessage();
-          System.out.println("Argument '-p' expected to be in key=value format (e.g., -p operationcount=99999)");
+          System.out.println("Argument '-p' expected key=value (e.g., -p operationcount=99999)");
           System.exit(0);
         }
 
@@ -649,11 +734,9 @@ public final class Client {
     if (argindex != args.length) {
       usageMessage();
       if (argindex < args.length) {
-        System.out.println("An argument value without corresponding argument specifier (e.g., -p, -s) was found. "
-            + "We expected an argument specifier and instead found " + args[argindex]);
+        System.out.println("Found value without flag (e.g., -p, -s): " + args[argindex]);
       } else {
-        System.out.println("An argument specifier without corresponding value was found at the end of the supplied " +
-            "command line arguments.");
+        System.out.println("Found flag without value at end of arguments.");
       }
       System.exit(0);
     }
